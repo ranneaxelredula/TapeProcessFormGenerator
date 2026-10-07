@@ -1,0 +1,5 @@
+# Windows batch files must keep CRLF line endings (cmd mis-jumps on "goto"
+# with LF-only files), so store them byte-for-byte with no conversion.
+*.bat -text
+# Icons are binary.
+*.ico binary

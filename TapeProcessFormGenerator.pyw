@@ -23,6 +23,9 @@ Usage:
   1. Place this file in the same folder as IBAD-PF-009-Rev00_Tape_Process_Form.pdf
   2. Double-click TapeProcessFormGenerator.pyw
   3. Browse to your Excel file, confirm the output path, click Generate.
+
+To make a stand-alone TapeProcessFormGenerator.exe (no Python needed to run
+it), double-click build_exe.bat; then keep the template PDF next to the .exe.
 """
 
 import tkinter as tk
@@ -43,6 +46,10 @@ try:
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 except ImportError:
+    # In a built .exe, sys.executable is the .exe itself, so "pip install"
+    # would just relaunch the program; a missing module there is a build bug.
+    if getattr(sys, "frozen", False):
+        raise
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install",
                            "pandas", "openpyxl", "pypdf", "reportlab",
@@ -52,6 +59,24 @@ except ImportError:
     from reportlab.pdfgen import canvas as rl_canvas
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
+
+# ── Program files ─────────────────────────────────────────────────────────────
+TEMPLATE_FILE = "IBAD-PF-009-Rev00_Tape_Process_Form.pdf"
+ICON_FILE     = "logo.ico"     # window icon; build_exe.bat also uses it for the .exe
+
+
+def _app_dir():
+    """Folder the program lives in: the .exe's folder when built, else this script's."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _bundled_file(name):
+    """Path of a file packed into the .exe (PyInstaller unpacks it to
+    sys._MEIPASS), or of the file next to this script when not built."""
+    return os.path.join(getattr(sys, "_MEIPASS", None) or _app_dir(), name)
+
 
 # ── PDF page geometry (A4 portrait) ───────────────────────────────────────────
 PDF_W = 595.2
@@ -976,6 +1001,7 @@ class App(tk.Tk):
         self.title("Tape Process Form Generator")
         self.resizable(False, False)
         self.configure(bg=BG)
+        self._set_icon()
 
         self.excel_path    = tk.StringVar()
         self.template_path = tk.StringVar()
@@ -986,13 +1012,22 @@ class App(tk.Tk):
         self.detected_format = None     # 'rr124' | 'monday' | None
         self._cut_dates      = []       # list[date] available for the picker
 
-        here    = os.path.dirname(os.path.abspath(__file__))
-        default = os.path.join(here, "IBAD-PF-009-Rev00_Tape_Process_Form.pdf")
+        default = os.path.join(_app_dir(), TEMPLATE_FILE)
         if os.path.isfile(default):
             self.template_path.set(default)
 
         self._build_ui()
         self._center_window(510, 648)
+
+    def _set_icon(self):
+        """Show the program logo in the title bar and on the taskbar."""
+        icon = _bundled_file(ICON_FILE)
+        if not os.path.isfile(icon):
+            return
+        try:
+            self.iconbitmap(default=icon)
+        except tk.TclError:
+            pass        # Tk reads .ico files only on Windows
 
     # ── Input validation ────────────────────────────────────────────────────
     def _validate_pld(self, proposed: str) -> bool:
@@ -1329,5 +1364,16 @@ def _open_folder(path: str):
 
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Run as a .pyw, the taskbar would show pythonw.exe's icon; an app ID of
+    # its own makes it use the window's logo. Not in the built .exe: that
+    # already carries the logo, and an explicit ID would stop it grouping
+    # with a taskbar pin of the .exe (a second button would appear).
+    if not getattr(sys, "frozen", False):
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "FaradayFactoryJapan.TapeProcessFormGenerator")
+        except Exception:
+            pass    # not Windows
     app = App()
     app.mainloop()
