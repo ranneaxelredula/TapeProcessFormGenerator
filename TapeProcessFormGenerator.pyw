@@ -32,6 +32,7 @@ import io
 import os
 import re
 import sys
+import unicodedata
 from collections import defaultdict
 
 # ── Auto-install missing dependencies ─────────────────────────────────────────
@@ -364,12 +365,31 @@ def _length_col(df):
     return None
 
 
+# A length typed as text together with its unit, e.g. "855 m", "855m", "650,5 M".
+# Group 1 is the number. "mm" (or any other unit) deliberately doesn't match.
+_LENGTH_WITH_UNIT = re.compile(r"\s*([\d.,]+)\s*m\s*", re.IGNORECASE)
+
+
+def parse_length(val):
+    """
+    Parse a length cell to metres, or None. Same as rr_to_float, except a text
+    cell may also carry a trailing "m" unit: "855 m" → 855.0. Full-width
+    characters typed with a Japanese IME ("８５５ｍ") are normalized first.
+    """
+    if isinstance(val, str):
+        val = unicodedata.normalize("NFKC", val)
+        m = _LENGTH_WITH_UNIT.fullmatch(val)
+        if m:
+            val = m.group(1)
+    return rr_to_float(val)
+
+
 def _length_and_pages(rec, len_col):
     """
-    (length, n_pages) for one row. No length column, or a blank / non-numeric
-    length, gives (None, 1) — see pages_for_length.
+    (length, n_pages) for one row. No length column, or a blank / unreadable
+    length, gives (None, 1) — see parse_length and pages_for_length.
     """
-    length = rr_to_float(rec[len_col]) if len_col is not None else None
+    length = parse_length(rec[len_col]) if len_col is not None else None
     return length, pages_for_length(length)
 
 
