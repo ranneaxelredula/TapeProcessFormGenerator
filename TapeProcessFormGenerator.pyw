@@ -1020,7 +1020,7 @@ class App(tk.Tk):
         self._center_window(510, 648)
 
     def _set_icon(self):
-        """Show the program logo in the title bar, taskbar and dialogs."""
+        """Show the program logo in the title bar and on the taskbar."""
         icon = _bundled_file(ICON_FILE)
         if not os.path.isfile(icon):
             return
@@ -1364,13 +1364,16 @@ def _open_folder(path: str):
 
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Windows groups taskbar buttons by process, so a .pyw would show Python's
-    # icon there; its own app ID makes the taskbar use the window's logo.
-    try:
-        import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "FaradayFactoryJapan.TapeProcessFormGenerator")
-    except Exception:
-        pass        # not Windows
+    # Run as a .pyw, the taskbar would show pythonw.exe's icon; an app ID of
+    # its own makes it use the window's logo. Not in the built .exe: that
+    # already carries the logo, and an explicit ID would stop it grouping
+    # with a taskbar pin of the .exe (a second button would appear).
+    if not getattr(sys, "frozen", False):
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "FaradayFactoryJapan.TapeProcessFormGenerator")
+        except Exception:
+            pass    # not Windows
     app = App()
     app.mainloop()

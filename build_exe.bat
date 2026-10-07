@@ -4,7 +4,7 @@ rem  Build TapeProcessFormGenerator.exe
 rem ---------------------------------------------------------------------------
 rem  Double-click this file. It packs TapeProcessFormGenerator.pyw, its
 rem  libraries and logo.ico into ONE file:  dist\TapeProcessFormGenerator.exe
-rem  The .exe runs on any Windows PC without Python installed.
+rem  The .exe runs on other 64-bit Windows 10/11 PCs without Python installed.
 rem
 rem  Only the PC that runs this build needs Python 3 (python.org installer,
 rem  which provides the "py" launcher, or "python" on PATH) and internet
@@ -32,6 +32,10 @@ if not exist "%ICON%" (
     goto :failed
 )
 
+rem Failures are checked as "errorlevel is not 0"; the shorter "if errorlevel 1"
+rem means 1 or higher and would miss negative exit codes (crashes, Python
+rem install manager errors).
+
 rem -- 1. Private Python environment with the build tools (first run only) ---
 if exist "%VENV%\Scripts\python.exe" goto :have_venv
 
@@ -44,18 +48,18 @@ if not defined PY (
 )
 if not defined PY goto :no_python
 %PY% -c "import sys" >nul 2>nul
-if errorlevel 1 goto :no_python
+if %errorlevel% neq 0 goto :no_python
 
 echo Creating the build environment in %VENV% ...
 %PY% -m venv "%VENV%"
-if errorlevel 1 goto :failed
+if %errorlevel% neq 0 goto :failed
 
 :have_venv
 set "VPY=%VENV%\Scripts\python.exe"
 
 echo Installing / updating PyInstaller and the program's libraries ...
 "%VPY%" -m pip install --upgrade --disable-pip-version-check pip pyinstaller pandas openpyxl pypdf reportlab
-if errorlevel 1 goto :failed
+if %errorlevel% neq 0 goto :failed
 
 rem -- 2. Build the .exe ------------------------------------------------------
 rem  --windowed       no black console window behind the program
@@ -70,14 +74,14 @@ echo Building %APP%.exe (this takes a minute or two) ...
     --add-data "%ICON%;." ^
     --hidden-import openpyxl ^
     "%APP%.pyw"
-if errorlevel 1 goto :failed
+if %errorlevel% neq 0 goto :failed
 
 rem -- 3. Put the form template next to the .exe, if it is here ---------------
 if exist "%TEMPLATE%" copy /y "%TEMPLATE%" "dist\%TEMPLATE%" >nul
 
 echo.
 echo ===========================================================================
-echo  Done:  %CD%\dist\%APP%.exe
+echo  Done:  "%CD%\dist\%APP%.exe"
 if exist "dist\%TEMPLATE%" (
     echo  The template PDF was copied next to it.
 ) else (
