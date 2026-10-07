@@ -4,7 +4,8 @@ Tape Process Form Generator  –  IBAD-PF-009 Rev 00
 Reads an Excel file (Monday.com / IBAD database export) and generates
 a multi-page PDF by filling the Tape Process Form template for each tape row.
 
-Pages per tape (RR124 format) depend on the tape's Length:
+Pages per tape (Monday and RR124 formats alike) depend on the tape's Length
+column — "Length, m" in Monday exports, "Length" in RR124 exports:
   - under 600 m        → 1 page
   - 600 m to 1099 m    → 2 pages
   - 1100 m and above   → 3 pages
@@ -349,6 +350,29 @@ def _col(df, name: str):
     return None
 
 
+# Accepted headers for the tape-length column (matched like _col): Monday.com
+# exports call it "Length, m", RR124 exports call it "Length".
+_LENGTH_HEADERS = ("Length", "Length, m")
+
+
+def _length_col(df):
+    """The tape-length column under either export's header, or None."""
+    for name in _LENGTH_HEADERS:
+        c = _col(df, name)
+        if c is not None:
+            return c
+    return None
+
+
+def _length_and_pages(rec, len_col):
+    """
+    (length, n_pages) for one row. No length column, or a blank / non-numeric
+    length, gives (None, 1) — see pages_for_length.
+    """
+    length = rr_to_float(rec[len_col]) if len_col is not None else None
+    return length, pages_for_length(length)
+
+
 def _status_norm(v) -> str:
     """Normalize Tape_Status: strip + case-fold (so 'cut Eval Sample' counts)."""
     return str(v).strip().casefold()
@@ -640,7 +664,8 @@ def read_monday(excel_path: str, log_cb=None):
     """
     Monday.com / IBAD database export reader.
     Returns (records, skipped) where each record is a normalized per-tape dict.
-    Behaviour is identical to the original program's reading logic.
+    Behaviour is identical to the original program's reading logic, except that
+    the page count now follows the "Length, m" column, as in the RR124 reader.
     """
     header_row = find_header_row(excel_path)
     df = pd.read_excel(excel_path, engine="openpyxl", header=header_row)
@@ -651,6 +676,7 @@ def read_monday(excel_path: str, log_cb=None):
     eval_end_col   = _col(df, "Evaluation_end")
     ref_col        = _col(df, "Reference Ic")
     dep_date_col   = _col(df, "IBAD deposition date")
+    len_col        = _length_col(df)              # optional – drives page count
 
     missing = [n for n, c_ in [
         ("Name", name_col),
@@ -670,6 +696,8 @@ def read_monday(excel_path: str, log_cb=None):
     if dep_date_col is None and log_cb:
         log_cb("⚠  'IBAD deposition date' column not found — "
                "deposition date will be blank.")
+    if len_col is None and log_cb:
+        log_cb("⚠  'Length, m' column not found — every tape will get 1 page.")
 
     records, skipped = [], []
     for i, (_, row) in enumerate(df.iterrows()):
@@ -698,18 +726,22 @@ def read_monday(excel_path: str, log_cb=None):
         if dep_date_col is not None:
             dep_year, dep_month, dep_day = fmt_deposition_date(row[dep_date_col])
 
+        length, n_pages = _length_and_pages(row, len_col)
+
         dep_str = f"{dep_year}/{dep_month}/{dep_day}" if dep_year else "—"
+        len_str = f"{fmt_float(length)} m" if length is not None else "—"
         records.append(dict(
             tape_num=tape_num, low=low, high=high, hastelloy=hastelloy,
             eval_val=eval_val, ref_ic=ref_ic,
             dep_year=dep_year, dep_month=dep_month, dep_day=dep_day,
             xrd_min="", xrd_ave="",
-            length=None, pages=1,     # Monday exports carry no Length column
+            length=length, pages=n_pages,
             log=(f"✔  #{tape_num} ({low}–{high})   "
                  f"Hastelloy={hastelloy} µm   "
                  f"EVAL={eval_val or '—'} A   "
                  f"REF={ref_ic or '—'} A   "
-                 f"Date={dep_str}"),
+                 f"Date={dep_str}   "
+                 f"Len={len_str} → {n_pages} pg"),
         ))
 
     return records, skipped
@@ -739,7 +771,7 @@ def read_rr124(excel_path: str, selected_date, log_cb=None):
     e_col      = _col(df, "Sample_Cuts_End_Coordinate")
     ic_col     = _col(df, "Ic")
     ref_col    = _col(df, "Reference_Ic")
-    len_col    = _col(df, "Length")                 # optional – drives page count
+    len_col    = _length_col(df)                    # optional – drives page count
     xrd_cols   = [c for c in df.columns
                   if str(c).strip().lower().startswith("2d_xrd_tilt_")]
 
@@ -800,8 +832,7 @@ def read_rr124(excel_path: str, selected_date, log_cb=None):
         eval_val, ref_ic, xrd_min, xrd_ave = _derive_values(
             cands, pool[key], s, e, s_col, e_col, ic_col, ref_col, xrd_cols)
 
-        length  = rr_to_float(r[len_col]) if len_col is not None else None
-        n_pages = pages_for_length(length)
+        length, n_pages = _length_and_pages(r, len_col)
 
         dep_str = f"{dep_year}/{dep_month}/{dep_day}" if dep_year else "—"
         len_str = f"{fmt_float(length)} m" if length is not None else "—"
