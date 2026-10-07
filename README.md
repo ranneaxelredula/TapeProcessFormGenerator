@@ -1,7 +1,8 @@
 # TapeProcessFormGenerator
 
 Fills the IBAD-PF-009 Tape Process Form PDF from a Monday.com or RR124 Excel
-export, with 1–3 pages per tape depending on its length.
+export, with 1–3 pages per tape depending on its length. The form template,
+`IBAD-PF-009-Rev00_Tape_Process_Form.pdf`, is included in this repository.
 
 ## Running it
 
@@ -18,7 +19,6 @@ export, with 1–3 pages per tape depending on its length.
 2. Double-click `build_exe.bat`. The first run downloads PyInstaller and the
    program's libraries into `build\venv` and takes a few minutes.
 3. The result is `dist\TapeProcessFormGenerator.exe`, with `logo.ico` as its
-   icon. If the template PDF is next to `build_exe.bat`, it is copied into
-   `dist\` as well.
+   icon. The template PDF is copied into `dist\` next to it.
 
 Hand out the .exe together with the template PDF.

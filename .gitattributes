@@ -3,3 +3,5 @@
 *.bat -text
 # Icons are binary.
 *.ico binary
+# The form template is binary; never convert line endings in it.
+*.pdf binary

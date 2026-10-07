@@ -83,26 +83,31 @@ PDF_W = 595.2
 PDF_H = 841.92
 
 # ── Field placement map ────────────────────────────────────────────────────────
-# (x_from_left, y_baseline_reportlab, cover_width)
+# (x_from_left, y_baseline_reportlab, cover_width[, cover_left])
 # y_baseline values taken directly from PDF content stream (bottom-origin)
-# so text sits on exactly the same baseline as the surrounding template text
+# so text sits on exactly the same baseline as the surrounding template text.
+# The white cover runs from cover_left to x + cover_width + 1; cover_left is
+# optional and defaults to x - 1, just left of the value.
 FIELDS = {
-    # (x_from_left,  y_baseline_reportlab,  cover_width)
+    # (x_from_left,  y_baseline_reportlab,  cover_width[, cover_left])
     # y values are exact text baselines from the PDF content stream (bottom-origin)
     "hastelloy":  (118.6, 746.1, 22.0),   # Buffer Tape line blank before "microns"
     "tape_num":   (228.8, 746.1, 45.0),   # tape identifier after "#"
     "coords":     (275.4, 746.1, 88.0),   # full "(low  -  high)" block
     "eval":       (191.1, 720.5, 35.0),   # value after IBAD#3_EVAL:
     "ref_ic":     (189.7, 707.2, 35.0),   # value after IBAD#3_ref:
-    # NEW (RR124): XRD Tilt values. Baselines match the EVAL / ref lines.
-    # The x positions below are ESTIMATES — calibrate against the real template
-    # the same way eval/ref were. The template prints "______°"; the cover width
-    # is wide enough to erase the underscores AND the printed °, because the
-    # value is now drawn with its own degree sign attached (see DEGREE_SIGN),
-    # which keeps the ° tight against the number instead of stranded at the end
-    # of the blank. Erasing both is what stops a doubled "3.01° °".
-    "xrd_min":    (300.0, 720.5, 42.0),   # value after "XRD Tilt_MIN:"  (same line as EVAL)
-    "xrd_ave":    (300.0, 707.2, 42.0),   # value after "XRD Tilt_AVE:"  (same line as ref_ic)
+    # NEW (RR124): XRD Tilt values. Baselines match the EVAL / ref lines; x
+    # positions are measured from the template. Each line prints "______°"
+    # straight after its colon (MIN: underscores from 293.2, ° ends 326.9;
+    # AVE: underscores from 291.2, ° ends 324.7 — the MIN subscript is wider).
+    # The cover starts at the first underscore and erases the printed ° too,
+    # because the value is drawn with its own degree sign attached (see
+    # DEGREE_SIGN); erasing both stops a doubled "3.01° °". It ends ~10 pt
+    # short of the surrounding box's right border (x = 339.0), which a wider
+    # cover used to erase. The value starts 2.3 pt after the colon, the same
+    # gap as "IBAD#3_EVAL: 398".
+    "xrd_min":    (295.6, 720.5, 32.0, 293.1),   # value after "XRD Tilt_MIN:"  (same line as EVAL)
+    "xrd_ave":    (293.6, 707.2, 32.0, 291.2),   # value after "XRD Tilt_AVE:"  (same line as ref_ic)
 }
 
 # Degree sign appended to the XRD tilt values, e.g. "3.01°".
@@ -606,12 +611,14 @@ def _draw_field(c, field_key: str, text: str):
     x and rl_y are taken directly from the PDF content stream so the text
     lands on exactly the same baseline as the surrounding template characters.
     """
-    x, rl_y, cover_w = FIELDS[field_key]          # rl_y is already bottom-origin
+    x, rl_y, cover_w, *opt = FIELDS[field_key]    # rl_y is already bottom-origin
+    cover_left = opt[0] if opt else x - 1
     font_name, font_size = FIELD_FONTS[field_key]
 
     # White erase rectangle (covers placeholder underscores)
     c.setFillColorRGB(1.0, 1.0, 1.0)
-    c.rect(x - 1, rl_y - 2, cover_w + 2, font_size + 4, fill=1, stroke=0)
+    c.rect(cover_left, rl_y - 2, x + cover_w + 1 - cover_left, font_size + 4,
+           fill=1, stroke=0)
 
     # Draw text on the exact same baseline as the surrounding template text
     c.setFillColorRGB(0.0, 0.0, 0.0)
