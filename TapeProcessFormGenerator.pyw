@@ -100,6 +100,8 @@ FIELDS = {
     # positions are measured from the template. Each line prints "______°"
     # straight after its colon (MIN: underscores from 293.2, ° ends 326.9;
     # AVE: underscores from 291.2, ° ends 324.7 — the MIN subscript is wider).
+    # The italic underscores' ink starts ~0.8 pt earlier, under the colon;
+    # see UNDERSCORE_OVERHANG for how that part is cleared.
     # The cover starts at the first underscore and erases the printed ° too,
     # because the value is drawn with its own degree sign attached (see
     # DEGREE_SIGN); erasing both stops a doubled "3.01° °". It ends ~10 pt
@@ -112,6 +114,13 @@ FIELDS = {
 
 # Degree sign appended to the XRD tilt values, e.g. "3.01°".
 DEGREE_SIGN = "\u00B0"
+
+# Italic underscores in the template overhang their glyph box to the left by
+# ~0.8 pt, under the colon before the blank. A full-height cover reaching that
+# far would clip the colon's upper dot, so fields with a cover_left also get a
+# strip this wide, just left of the cover and low enough to pass under the
+# colon's dots (from rl_y - 2 to rl_y - 0.6).
+UNDERSCORE_OVERHANG = 1.5
 
 # ── IBAD Deposition Date row placement ────────────────────────────────────────
 # The deposition row is the first data row of the table. Its existing text sits
@@ -619,6 +628,11 @@ def _draw_field(c, field_key: str, text: str):
     c.setFillColorRGB(1.0, 1.0, 1.0)
     c.rect(cover_left, rl_y - 2, x + cover_w + 1 - cover_left, font_size + 4,
            fill=1, stroke=0)
+    if opt:
+        # Overlaps the cover by 0.5 pt: two rects that merely touch can leave
+        # a faint anti-aliased seam between them in some PDF viewers.
+        c.rect(cover_left - UNDERSCORE_OVERHANG, rl_y - 2, UNDERSCORE_OVERHANG + 0.5,
+               1.4, fill=1, stroke=0)
 
     # Draw text on the exact same baseline as the surrounding template text
     c.setFillColorRGB(0.0, 0.0, 0.0)
