@@ -11,8 +11,9 @@ rem  which provides the "py" launcher, or "python" on PATH) and internet
 rem  access the first time. The build tools go into build\venv, so your own
 rem  Python installation is left untouched.
 rem
-rem  Hand out the .exe together with IBAD-PF-009-Rev00_Tape_Process_Form.pdf
-rem  in the same folder; the program picks the template up from there.
+rem  Hand out the .exe together with the Word template
+rem  IBAD-PF-009_Tape Process Form_Rev.0.docx in the same folder; the program
+rem  picks the template up from there.
 rem ===========================================================================
 setlocal
 rem pushd (not cd) also works when this file sits on a network share
@@ -20,7 +21,7 @@ pushd "%~dp0" || goto :failed
 
 set "APP=TapeProcessFormGenerator"
 set "ICON=logo.ico"
-set "TEMPLATE=IBAD-PF-009-Rev00_Tape_Process_Form.pdf"
+set "TEMPLATE=IBAD-PF-009_Tape Process Form_Rev.0.docx"
 set "VENV=build\venv"
 
 if not exist "%APP%.pyw" (
@@ -58,7 +59,7 @@ if %errorlevel% neq 0 goto :failed
 set "VPY=%VENV%\Scripts\python.exe"
 
 echo Installing / updating PyInstaller and the program's libraries ...
-"%VPY%" -m pip install --upgrade --disable-pip-version-check pip pyinstaller pandas openpyxl pypdf reportlab
+"%VPY%" -m pip install --upgrade --disable-pip-version-check pip pyinstaller pandas openpyxl python-docx
 if %errorlevel% neq 0 goto :failed
 
 rem -- 2. Build the .exe ------------------------------------------------------
@@ -83,7 +84,7 @@ echo.
 echo ===========================================================================
 echo  Done:  "%CD%\dist\%APP%.exe"
 if exist "dist\%TEMPLATE%" (
-    echo  The template PDF was copied next to it.
+    echo  The Word template was copied next to it.
 ) else (
     echo  Put %TEMPLATE% in the same folder as the .exe.
 )
