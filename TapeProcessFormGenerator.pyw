@@ -1,8 +1,9 @@
 """
 Tape Process Form Generator  –  IBAD-PF-009 Rev 00
 ----------------------------------------------------
-Reads an Excel file (Monday.com / IBAD database export) and generates
-a multi-page PDF by filling the Tape Process Form template for each tape row.
+Reads an Excel file (Monday.com / IBAD database export) and generates one
+multi-page Word file by filling the Tape Process Form Word template for each
+tape row; the result stays editable in Word.
 
 Pages per tape (Monday and RR124 formats alike) depend on the tape's Length
 column — "Length, m" in Monday exports, "Length" in RR124 exports:
@@ -13,24 +14,29 @@ The first page carries every extracted value including the coordinates; any
 additional page repeats the same values but leaves the coordinate field as a
 blank "(______-______)" for hand entry.
 
-Fields filled per page:
-  - Hastelloy thickness   → blank before "microns"       [Calibri Regular 11pt]
-  - Name (#…(low-high))  → tape number + coordinates     [Calibri Regular 11pt]
-  - max(Evaluation_start, Evaluation_end) → IBAD#3_EVAL  [Calibri Italic  10pt]
-  - Reference Ic          → IBAD#3_ref                   [Calibri Italic  10pt]
+Fields filled per page (each value replaces its blank in the form, not
+underlined; a missing value leaves the blank for hand entry):
+  - Hastelloy thickness   → blank before "microns"
+  - Name (#…(low-high))  → tape number + coordinates
+  - max(Evaluation_start, Evaluation_end) → IBAD#3_EVAL, written as "398A"
+  - Reference Ic          → IBAD#3_ref, written as "480A"
+  - XRD Tilt MIN / AVE    → before the printed "°" (RR124 exports only)
+  - IBAD deposition date  → the "202_/ 月/ 日" date of the IBAD Deposition row
+  - "Sent to PLD by:"     → that row's Responsible Person column
 
 Usage:
-  1. Place this file in the same folder as IBAD-PF-009-Rev00_Tape_Process_Form.pdf
+  1. Place this file in the same folder as IBAD-PF-009_Tape Process Form_Rev.0.docx
   2. Double-click TapeProcessFormGenerator.pyw
   3. Browse to your Excel file, confirm the output path, click Generate.
 
 To make a stand-alone TapeProcessFormGenerator.exe (no Python needed to run
-it), double-click build_exe.bat; then keep the template PDF next to the .exe.
+it), double-click build_exe.bat; then keep the Word template next to the .exe.
 """
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import threading
+import copy
 import io
 import os
 import re
@@ -41,10 +47,11 @@ from collections import defaultdict
 # ── Auto-install missing dependencies ─────────────────────────────────────────
 try:
     import pandas as pd
-    from pypdf import PdfReader, PdfWriter
-    from reportlab.pdfgen import canvas as rl_canvas
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
+    import docx                                   # package "python-docx"
+    from docx.shared import Pt
+    from docx.text.paragraph import Paragraph
+    from docx.text.run import Run
+    from docx.oxml import OxmlElement
 except ImportError:
     # In a built .exe, sys.executable is the .exe itself, so "pip install"
     # would just relaunch the program; a missing module there is a build bug.
@@ -52,16 +59,17 @@ except ImportError:
         raise
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install",
-                           "pandas", "openpyxl", "pypdf", "reportlab",
+                           "pandas", "openpyxl", "python-docx",
                            "--quiet"])
     import pandas as pd
-    from pypdf import PdfReader, PdfWriter
-    from reportlab.pdfgen import canvas as rl_canvas
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
+    import docx
+    from docx.shared import Pt
+    from docx.text.paragraph import Paragraph
+    from docx.text.run import Run
+    from docx.oxml import OxmlElement
 
 # ── Program files ─────────────────────────────────────────────────────────────
-TEMPLATE_FILE = "IBAD-PF-009-Rev00_Tape_Process_Form.pdf"
+TEMPLATE_FILE = "IBAD-PF-009_Tape Process Form_Rev.0.docx"
 ICON_FILE     = "logo.ico"     # window icon; build_exe.bat also uses it for the .exe
 
 
@@ -78,69 +86,6 @@ def _bundled_file(name):
     return os.path.join(getattr(sys, "_MEIPASS", None) or _app_dir(), name)
 
 
-# ── PDF page geometry (A4 portrait) ───────────────────────────────────────────
-PDF_W = 595.2
-PDF_H = 841.92
-
-# ── Field placement map ────────────────────────────────────────────────────────
-# (x_from_left, y_baseline_reportlab, cover_width[, cover_left])
-# y_baseline values taken directly from PDF content stream (bottom-origin)
-# so text sits on exactly the same baseline as the surrounding template text.
-# The white cover runs from cover_left to x + cover_width + 1; cover_left is
-# optional and defaults to x - 1, just left of the value.
-FIELDS = {
-    # (x_from_left,  y_baseline_reportlab,  cover_width[, cover_left])
-    # y values are exact text baselines from the PDF content stream (bottom-origin)
-    "hastelloy":  (118.6, 746.1, 22.0),   # Buffer Tape line blank before "microns"
-    "tape_num":   (228.8, 746.1, 45.0),   # tape identifier after "#"
-    "coords":     (275.4, 746.1, 88.0),   # full "(low  -  high)" block
-    "eval":       (191.1, 720.5, 35.0),   # value after IBAD#3_EVAL:
-    "ref_ic":     (189.7, 707.2, 35.0),   # value after IBAD#3_ref:
-    # NEW (RR124): XRD Tilt values. Baselines match the EVAL / ref lines; x
-    # positions are measured from the template. Each line prints "______°"
-    # straight after its colon (MIN: underscores from 293.2, ° ends 326.9;
-    # AVE: underscores from 291.2, ° ends 324.7 — the MIN subscript is wider).
-    # The italic underscores' ink starts ~0.8 pt earlier, under the colon;
-    # see UNDERSCORE_OVERHANG for how that part is cleared.
-    # The cover starts at the first underscore and erases the printed ° too,
-    # because the value is drawn with its own degree sign attached (see
-    # DEGREE_SIGN); erasing both stops a doubled "3.01° °". It ends ~10 pt
-    # short of the surrounding box's right border (x = 339.0), which a wider
-    # cover used to erase. The value starts 2.3 pt after the colon, the same
-    # gap as "IBAD#3_EVAL: 398".
-    "xrd_min":    (295.6, 720.5, 32.0, 293.1),   # value after "XRD Tilt_MIN:"  (same line as EVAL)
-    "xrd_ave":    (293.6, 707.2, 32.0, 291.2),   # value after "XRD Tilt_AVE:"  (same line as ref_ic)
-}
-
-# Degree sign appended to the XRD tilt values, e.g. "3.01°".
-DEGREE_SIGN = "\u00B0"
-
-# Italic underscores in the template overhang their glyph box to the left by
-# ~0.8 pt, under the colon before the blank. A full-height cover reaching that
-# far would clip the colon's upper dot, so fields with a cover_left also get a
-# strip this wide, just left of the cover and low enough to pass under the
-# colon's dots (from rl_y - 2 to rl_y - 0.6).
-UNDERSCORE_OVERHANG = 1.5
-
-# ── IBAD Deposition Date row placement ────────────────────────────────────────
-# The deposition row is the first data row of the table. Its existing text sits
-# on baseline y = 632.5 (bottom-origin). The template already prints the kanji
-# "月" (month, at x=66.7) and "日" (day, at x=96.3) plus the slashes, so we only
-# overlay the Calibri digits into the blanks — this matches the form exactly and
-# needs no Japanese font.
-DEP_BASELINE   = 632.5          # baseline of the deposition-date row text
-DEP_YEAR_X     = 32.7           # left edge of the year digits ("202_")
-DEP_YEAR_COVER = (31.5, 19.0)   # (x, width) white box covering the printed "202_"
-DEP_MONTH_RX   = 65.8           # right edge to right-align the 2-digit month (before 月)
-DEP_DAY_RX     = 95.3           # right edge to right-align the 2-digit day   (before 日)
-DEP_FONT_SIZE  = 9              # matches the row's printed text size
-
-# "Sent to PLD by:" value — centered in the Responsible Person column (col 4),
-# on the same deposition row / baseline.
-PLD_CENTER_X   = (315.5 + 420.2) / 2.0   # horizontal centre of the Responsible col
-PLD_BASELINE   = 632.5
-PLD_FONT_SIZE  = 9
-
 # Input validation limits for the "Sent to PLD by:" field
 PLD_MIN_CHARS = 4
 PLD_MAX_CHARS = 10
@@ -153,8 +98,8 @@ PAGE_LEN_2 = 600.0
 PAGE_LEN_3 = 1100.0
 MAX_PAGES  = 3
 
-# Written into the coordinate field on continuation pages: the printed
-# placeholder is erased and this blank line is drawn in its place.
+# Written into the coordinate field on continuation pages, in place of the
+# form's own blank, so the coordinates can be filled in by hand.
 COORDS_BLANK = "(______-______)"
 
 
@@ -178,81 +123,6 @@ def pages_for_length(length):
     if L >= PAGE_LEN_2:
         return 2
     return 1
-
-# Font specs matching the PDF template
-# Buffer Tape line  → Calibri Regular 11pt
-# IBAD#3 eval/ref   → Calibri Italic  10pt
-FONT_REGULAR_SIZE = 11
-FONT_ITALIC_SIZE  = 10
-
-# Field → (font_key, size)
-FIELD_FONTS = {
-    "hastelloy": ("CalibrRegular", FONT_REGULAR_SIZE),
-    "tape_num":  ("CalibrRegular", FONT_REGULAR_SIZE),
-    "coords":    ("CalibrRegular", FONT_REGULAR_SIZE),
-    "eval":      ("CalibrItalic",  FONT_ITALIC_SIZE),
-    "ref_ic":    ("CalibrItalic",  FONT_ITALIC_SIZE),
-    "xrd_min":   ("CalibrItalic",  FONT_ITALIC_SIZE),
-    "xrd_ave":   ("CalibrItalic",  FONT_ITALIC_SIZE),
-}
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  FONT SETUP
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _font_candidates():
-    """Return (regular_path, italic_path) searching common OS locations."""
-    win   = os.environ.get("SystemRoot", r"C:\Windows")
-    paths = [
-        # Windows
-        (os.path.join(win, r"Fonts\calibri.ttf"),
-         os.path.join(win, r"Fonts\calibrii.ttf")),
-        # macOS (Office install)
-        ("/Library/Fonts/Microsoft/Calibri.ttf",
-         "/Library/Fonts/Microsoft/Calibri Italic.ttf"),
-        # Linux Carlito (metric-identical free substitute)
-        ("/usr/share/fonts/truetype/crosextra/Carlito-Regular.ttf",
-         "/usr/share/fonts/truetype/crosextra/Carlito-Italic.ttf"),
-        # Ubuntu alternative path
-        ("/usr/share/fonts/truetype/carlito/Carlito-Regular.ttf",
-         "/usr/share/fonts/truetype/carlito/Carlito-Italic.ttf"),
-    ]
-    for reg, ital in paths:
-        if os.path.isfile(reg) and os.path.isfile(ital):
-            return reg, ital
-    return None, None
-
-
-def setup_fonts():
-    """
-    Register Calibri (or its substitute) with ReportLab.
-    Falls back to Helvetica / Helvetica-Oblique if no TTF is found.
-    Returns (regular_font_name, italic_font_name).
-    """
-    reg_path, ital_path = _font_candidates()
-    if reg_path:
-        try:
-            pdfmetrics.registerFont(TTFont("CalibrRegular", reg_path))
-            pdfmetrics.registerFont(TTFont("CalibrItalic",  ital_path))
-            return "CalibrRegular", "CalibrItalic"
-        except Exception:
-            pass
-    # Built-in fallback
-    return "Helvetica", "Helvetica-Oblique"
-
-
-# Register fonts once at module level
-_REG_FONT, _ITAL_FONT = setup_fonts()
-
-# Patch font keys to what was actually registered
-FIELD_FONTS["hastelloy"] = (_REG_FONT,  FONT_REGULAR_SIZE)
-FIELD_FONTS["tape_num"]  = (_REG_FONT,  FONT_REGULAR_SIZE)
-FIELD_FONTS["coords"]    = (_REG_FONT,  FONT_REGULAR_SIZE)
-FIELD_FONTS["eval"]      = (_ITAL_FONT, FONT_ITALIC_SIZE)
-FIELD_FONTS["ref_ic"]    = (_ITAL_FONT, FONT_ITALIC_SIZE)
-FIELD_FONTS["xrd_min"]   = (_ITAL_FONT, FONT_ITALIC_SIZE)
-FIELD_FONTS["xrd_ave"]   = (_ITAL_FONT, FONT_ITALIC_SIZE)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -611,115 +481,285 @@ def _derive_values(cands, pool, pld_s, pld_e, s_col, e_col, ic_col, ref_col, xrd
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  PDF OVERLAY BUILDER
+#  WORD TEMPLATE FILLING
 # ──────────────────────────────────────────────────────────────────────────────
+# Each blank is found by the visible text around it (e.g. the "____" right
+# before "microns"), never by Word's internal text chunks ("runs"), which Word
+# splits differently whenever the file is edited and saved. If a blank can't be
+# found, generation stops with a message naming it rather than fill the wrong
+# place. A value replaces its blank in a run of its own, formatted like the
+# blank but not underlined; a missing value leaves the blank as printed.
 
-def _draw_field(c, field_key: str, text: str):
+_W    = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_M    = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
+_WP   = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+_V    = "{urn:schemas-microsoft-com:vml}"
+_O    = "{urn:schemas-microsoft-com:office:office}"
+_W14  = "{http://schemas.microsoft.com/office/word/2010/wordml}"
+_WP14 = "{http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing}"
+_XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+NBSP = " "
+
+# The IBAD#3 box's equation labels as they appear in a paragraph's visible
+# text (see _para_segments): IBAD#3 with subscript EVAL is ⟦IBAD#3EVAL⟧, etc.
+_EVAL_LABEL, _REF_LABEL = "⟦IBAD#3EVAL⟧", "⟦IBAD#3ref⟧"
+_MIN_LABEL,  _AVE_LABEL = "⟦XRDTiltMIN⟧", "⟦XRDTiltAVE⟧"
+
+# Where "XRD Tilt" starts in the IBAD#3 box, as on the form's first line
+# (105 pt from the box's text edge). A tab stop there keeps both XRD labels
+# aligned whatever the length of the EVAL / ref values before them.
+XRD_TAB_STOP = Pt(105)
+
+
+class TemplateMismatch(ValueError):
+    """The Word template has no blank where the program expects one."""
+
+    def __init__(self, what):
+        super().__init__(
+            f"The Word template doesn't match the form this program fills: "
+            f"couldn't find {what}.\n\n"
+            f"Use the original {TEMPLATE_FILE}, or update the program if the "
+            f"form has been revised.")
+
+
+def _para_segments(p):
     """
-    Erase the placeholder area, then write `text` with the correct font/size.
-    x and rl_y are taken directly from the PDF content stream so the text
-    lands on exactly the same baseline as the surrounding template characters.
+    The visible text of paragraph element `p` as (text, w:t element) pieces.
+    Only text in the paragraph's own runs is editable (it has a w:t element);
+    equation labels appear as ⟦label⟧, tabs as "\\t" and line breaks as "\\n"
+    (with None). Text boxes anchored in `p` have paragraphs of their own.
     """
-    x, rl_y, cover_w, *opt = FIELDS[field_key]    # rl_y is already bottom-origin
-    cover_left = opt[0] if opt else x - 1
-    font_name, font_size = FIELD_FONTS[field_key]
-
-    # White erase rectangle (covers placeholder underscores)
-    c.setFillColorRGB(1.0, 1.0, 1.0)
-    c.rect(cover_left, rl_y - 2, x + cover_w + 1 - cover_left, font_size + 4,
-           fill=1, stroke=0)
-    if opt:
-        # Overlaps the cover by 0.5 pt: two rects that merely touch can leave
-        # a faint anti-aliased seam between them in some PDF viewers.
-        c.rect(cover_left - UNDERSCORE_OVERHANG, rl_y - 2, UNDERSCORE_OVERHANG + 0.5,
-               1.4, fill=1, stroke=0)
-
-    # Draw text on the exact same baseline as the surrounding template text
-    c.setFillColorRGB(0.0, 0.0, 0.0)
-    c.setFont(font_name, font_size)
-    c.drawString(x, rl_y, text)
+    segs = []
+    for child in p:
+        if child.tag == _W + "r":
+            for el in child:
+                if el.tag == _W + "t":
+                    segs.append((el.text or "", el))
+                elif el.tag == _W + "tab":
+                    segs.append(("\t", None))
+                elif el.tag in (_W + "br", _W + "cr"):
+                    segs.append(("\n", None))
+        elif child.tag == _M + "oMath":
+            label = "".join(t.text or "" for t in child.iter(_M + "t"))
+            segs.append(("⟦" + "".join(label.split()) + "⟧", None))
+    return segs
 
 
-def _draw_deposition_date(c, year, month, day):
+def _para_text(p):
+    return "".join(text for text, _ in _para_segments(p))
+
+
+def _find_paragraph(paragraphs, pattern, what):
+    """The one paragraph element among `paragraphs` whose text matches `pattern`."""
+    found = [p for p in paragraphs if re.search(pattern, _para_text(p))]
+    if len(found) != 1:
+        raise TemplateMismatch(what)
+    return found[0]
+
+
+def _value_run(like_r, value):
+    """A new run holding `value` ("\\t" = tab, "\\n" = line break), formatted
+    like the run `like_r` but not underlined."""
+    r = OxmlElement("w:r")
+    rpr = like_r.find(_W + "rPr")
+    if rpr is not None:
+        r.append(copy.deepcopy(rpr))
+    for part in re.split(r"([\t\n])", value):
+        if part == "\t":
+            r.append(OxmlElement("w:tab"))
+        elif part == "\n":
+            r.append(OxmlElement("w:br"))
+        elif part:
+            t = OxmlElement("w:t")
+            t.text = part
+            t.set(_XML_SPACE, "preserve")
+            r.append(t)
+    Run(r, None).font.underline = False
+    return r
+
+
+def _drop_if_empty(r):
+    """Remove run `r` if it holds no content (only formatting or empty text)."""
+    if r.getparent() is None:
+        return
+    if all(el.tag == _W + "rPr" or (el.tag == _W + "t" and not el.text) for el in r):
+        r.getparent().remove(r)
+
+
+def _replace(p, start, end, value):
+    """Replace the visible text [start, end) of paragraph `p` with `value`."""
+    pieces, pos = [], 0
+    for text, t in _para_segments(p):
+        lo, hi = max(start, pos), min(end, pos + len(text))
+        if lo < hi:
+            if t is None:              # a pattern group never spans labels or tabs
+                raise TemplateMismatch("an editable blank")
+            pieces.append((t, lo - pos, hi - pos))
+        pos += len(text)
+    for t, lo, hi in pieces:           # take the blank's text out
+        text = t.text or ""
+        t.text = text[:lo] + text[hi:]
+        t.set(_XML_SPACE, "preserve")
+
+    # Split the first run where the blank began; the value goes in between.
+    first_t, cut, _ = pieces[0]
+    first_r = first_t.getparent()
+    rest = OxmlElement("w:r")
+    rpr = first_r.find(_W + "rPr")
+    if rpr is not None:
+        rest.append(copy.deepcopy(rpr))
+    after = first_t.text[cut:]
+    first_t.text = first_t.text[:cut]
+    if after:
+        t = OxmlElement("w:t")
+        t.text = after
+        t.set(_XML_SPACE, "preserve")
+        rest.append(t)
+    for el in list(first_t.itersiblings()):
+        rest.append(el)
+    first_r.addnext(rest)
+    first_r.addnext(_value_run(first_r, value))
+    for r in {first_r, rest, *(t.getparent() for t, _, _ in pieces)}:
+        _drop_if_empty(r)
+
+
+def _fill(p, pattern, values, what):
     """
-    Fill the IBAD Deposition Date cell.  The template already prints the kanji
-    月 / 日 and the slashes, so we overlay only the Calibri digits:
-      - the 4-digit year over the printed "202_" placeholder
-      - the 2-digit month right-aligned just before 月
-      - the 2-digit day  right-aligned just before 日
+    Find `pattern` exactly once in paragraph `p` and replace its groups with
+    `values`, in order; a value of None leaves that group as printed.
     """
-    font = _REG_FONT
-    # Year — cover the printed "202_" and write the full year
-    cover_x, cover_w = DEP_YEAR_COVER
-    c.setFillColorRGB(1.0, 1.0, 1.0)
-    c.rect(cover_x, DEP_BASELINE - 2, cover_w, DEP_FONT_SIZE + 3, fill=1, stroke=0)
-    c.setFillColorRGB(0.0, 0.0, 0.0)
-    c.setFont(font, DEP_FONT_SIZE)
-    c.drawString(DEP_YEAR_X, DEP_BASELINE, year)
-    # Month — right-aligned before 月
-    c.drawRightString(DEP_MONTH_RX, DEP_BASELINE, month)
-    # Day — right-aligned before 日
-    c.drawRightString(DEP_DAY_RX, DEP_BASELINE, day)
+    found = list(re.finditer(pattern, _para_text(p)))
+    if len(found) != 1:
+        raise TemplateMismatch(what)
+    m = found[0]
+    for group in range(len(values), 0, -1):    # last first: earlier offsets stay put
+        if values[group - 1] is not None:
+            _replace(p, *m.span(group), values[group - 1])
 
 
-def _draw_pld_by(c, text):
-    """Center the 'Sent to PLD by:' value in the Responsible Person column."""
-    c.setFillColorRGB(0.0, 0.0, 0.0)
-    c.setFont(_REG_FONT, PLD_FONT_SIZE)
-    c.drawCentredString(PLD_CENTER_X, PLD_BASELINE, text)
+def _fill_buffer_line(doc, rec, continuation):
+    """Hastelloy thickness, tape number and coordinates on the Buffer Tape line."""
+    p = _find_paragraph(doc.element.body.iterchildren(_W + "p"), r"^Buffer Tape",
+                        "the Buffer Tape line")
+    if continuation:
+        coords = " " + COORDS_BLANK
+    elif rec.get("low") is not None and rec.get("high") is not None:
+        coords = f" ({rec['low']} - {rec['high']})"
+    else:
+        coords = None
+    _fill(p, r"\(LMO, (_+) microns.*?#\s*(_+)( \(_+\s*_+-\s*_+\s*\))",
+          [rec.get("hastelloy") or None, rec.get("tape_num") or None, coords],
+          "the thickness / tape number / coordinate blanks on the Buffer Tape line")
 
 
-def build_overlay(tape_num, low, high,
-                  hastelloy, eval_val, ref_ic,
-                  dep_year=None, dep_month=None, dep_day=None,
-                  pld_by="", xrd_min="", xrd_ave="",
-                  blank_coords=False) -> io.BytesIO:
+def _fill_ibad_box(doc, rec):
     """
-    Create a single-page ReportLab PDF containing only the filled values.
-    Each value erases the template's printed underscore blank behind it.
-
-    `blank_coords=True` is used for the continuation pages of a long tape: every
-    other value is drawn exactly as on page 1, but the coordinate field is
-    written as COORDS_BLANK — "(______-______)" — instead of the real range.
+    EVAL / ref values ("398A") and XRD Tilt values in the IBAD#3 box. Word keeps
+    two copies of a text box (for current and for older Word versions); both
+    are filled. The box's two lines get a real line break, so a short value
+    can't pull the second line up. On a line whose EVAL / ref value is filled
+    in, a tab moves "XRD Tilt" to XRD_TAB_STOP; a line whose value is missing
+    keeps the form's own blank and spacing, which only just fit before that
+    position.
     """
-    buf = io.BytesIO()
-    c = rl_canvas.Canvas(buf, pagesize=(PDF_W, PDF_H))
+    paras = [p for p in doc.element.body.iter(_W + "p") if _EVAL_LABEL in _para_text(p)]
+    if not paras:
+        raise TemplateMismatch("the IBAD#3 / XRD Tilt box")
+    ev, ref = rec.get("eval_val"), rec.get("ref_ic")
+    x_min, x_ave = rec.get("xrd_min"), rec.get("xrd_ave")
+    pattern = (re.escape(_EVAL_LABEL) + r":([\xa0 ]+)A( +)"
+               + re.escape(_MIN_LABEL) + r":(_+)°( +)"
+               + re.escape(_REF_LABEL) + r":([\xa0 ]+)A( +)"
+               + re.escape(_AVE_LABEL) + r":(_+)°")
+    values = [
+        NBSP + ev if ev else None,              # "IBAD#3_EVAL: 398" + the form's "A"
+        "\t" if ev else None,
+        NBSP + x_min if x_min else None,        # + the form's "°"
+        "\n",
+        "  " + NBSP + ref if ref else None,     # the form's spacing: values line up
+        "\t" if ref else None,
+        NBSP + x_ave if x_ave else None,
+    ]
+    for p in paras:
+        _fill(p, pattern, values, "the IBAD#3 / XRD Tilt blanks")
+        Paragraph(p, None).paragraph_format.tab_stops.add_tab_stop(XRD_TAB_STOP)
 
-    if hastelloy:
-        _draw_field(c, "hastelloy", hastelloy)
-    if tape_num:
-        _draw_field(c, "tape_num", tape_num)
-    if blank_coords:
-        # Continuation page: erase the printed placeholder and lay down an empty
-        # line in its place, so the template's own underscores cannot show
-        # through the ones we draw.
-        _draw_field(c, "coords", COORDS_BLANK)
-    elif low is not None and high is not None:
-        _draw_field(c, "coords", f"( {low}   -   {high} )")
-    if eval_val:
-        _draw_field(c, "eval", eval_val)
-    if ref_ic:
-        _draw_field(c, "ref_ic", ref_ic)
 
-    # NEW (RR124): XRD Tilt values (left blank for Monday-format records).
-    # The degree sign is drawn as part of the value so it sits directly after
-    # the number; the template's own printed ° is erased underneath.
-    if xrd_min:
-        _draw_field(c, "xrd_min", f"{xrd_min}{DEGREE_SIGN}")
-    if xrd_ave:
-        _draw_field(c, "xrd_ave", f"{xrd_ave}{DEGREE_SIGN}")
+def _fill_deposition_row(doc, rec, pld_by):
+    """IBAD deposition date and "Sent to PLD by:" in the IBAD Deposition row."""
+    for table in doc.tables:
+        resp_col = None
+        for row in table.rows:
+            texts = [cell.text.strip() for cell in row.cells]
+            if resp_col is None:
+                resp_col = next((i for i, t in enumerate(texts)
+                                 if t.startswith("Responsible")), None)
+            if "IBAD Deposition Date" not in texts:
+                continue
+            if rec.get("dep_year") and rec.get("dep_month") and rec.get("dep_day"):
+                p = _find_paragraph((par._p for par in row.cells[0].paragraphs),
+                                    r"202_/\s*月/\s*日", "the IBAD deposition date blank")
+                _fill(p, r"(202_)/( +)月/([　 ]+)日",
+                      [rec["dep_year"], " " + rec["dep_month"], " " + rec["dep_day"]],
+                      "the IBAD deposition date blank")
+            if pld_by:
+                if resp_col is None or row.cells[resp_col].text.strip():
+                    raise TemplateMismatch(
+                        "an empty Responsible Person cell in the IBAD Deposition row")
+                run = row.cells[resp_col].paragraphs[0].add_run(pld_by)
+                run.font.size = Pt(9)                # the row's text size
+            return
+    raise TemplateMismatch("the IBAD Deposition Date row")
 
-    # IBAD Deposition Date (left blank if no valid date for this row)
-    if dep_year and dep_month and dep_day:
-        _draw_deposition_date(c, dep_year, dep_month, dep_day)
 
-    # "Sent to PLD by:" — same value on every page (left blank if not entered)
-    if pld_by:
-        _draw_pld_by(c, pld_by)
+def fill_page(doc, rec, pld_by="", continuation=False):
+    """
+    Fill one copy of the form (a python-docx Document) for tape record `rec`.
+    `continuation=True` is for a long tape's extra pages: every value is the
+    same as on its first page, but the coordinates are left as COORDS_BLANK.
+    """
+    _fill_buffer_line(doc, rec, continuation)
+    _fill_ibad_box(doc, rec)
+    _fill_deposition_row(doc, rec, pld_by)
 
-    c.save()
-    buf.seek(0)
-    return buf
+
+def _append_page(out_doc, page_doc):
+    """
+    Append the filled form `page_doc` to `out_doc` as a new page. The last
+    paragraph of `out_doc` becomes a section break (an extra page-break
+    paragraph would push a blank page), and the IDs that must be unique within
+    one Word file are renumbered; the text/paragraph IDs are dropped and Word
+    regenerates them.
+    """
+    body = out_doc.element.body
+    sect = body.find(_W + "sectPr")
+    last_p = sect.getprevious()
+    if last_p is None or last_p.tag != _W + "p":
+        raise TemplateMismatch("the empty paragraph that ends the form")
+    ppr = last_p.find(_W + "pPr")
+    if ppr is None:
+        ppr = OxmlElement("w:pPr")
+        last_p.insert(0, ppr)
+    ppr.append(copy.deepcopy(sect))
+
+    next_id = 1 + max((int(d.get("id")) for d in body.iter(_WP + "docPr")
+                       if (d.get("id") or "").isdigit()), default=0)
+    for child in list(page_doc.element.body):
+        if child.tag == _W + "sectPr":
+            continue
+        for el in child.iter():
+            if el.tag == _WP + "docPr":
+                el.set("id", str(next_id))
+                next_id += 1
+            elif el.tag.startswith(_V) and el.get("id"):
+                el.set("id", f"{el.get('id')}_{next_id}")
+                next_id += 1
+            if el.get(_O + "spid"):
+                el.set(_O + "spid", f"_x0000_s{next_id}")
+                next_id += 1
+            for attr in (_W14 + "paraId", _W14 + "textId", _WP14 + "anchorId"):
+                el.attrib.pop(attr, None)
+        sect.addprevious(child)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -925,13 +965,17 @@ def generate(excel_path: str, template_path: str, output_path: str,
              progress_cb=None, log_cb=None):
     """
     Detect the file format (unless `fmt` is supplied), dispatch to the right
-    reader, then render onto the template the number of pages each record calls
-    for (see pages_for_length). Page 1 carries the coordinates; any further page
-    for the same tape repeats every other value with the coordinate field left
-    blank.
+    reader, then fill the Word template once for every page each record calls
+    for (see pages_for_length) and save all pages as one Word file. Page 1
+    carries the coordinates; any further page for the same tape repeats every
+    other value with the coordinate field left blank.
 
     Returns (pages_generated, skipped_descriptions).
     """
+    if not template_path.lower().endswith(".docx"):
+        raise ValueError(
+            "The template must be the Word form (.docx):\n"
+            f"{TEMPLATE_FILE}")
     if fmt is None:
         fmt = detect_format(excel_path)
 
@@ -952,7 +996,10 @@ def generate(excel_path: str, template_path: str, output_path: str,
             "Make sure the Name column contains entries like:\n"
             "  #3244(1235–2165)\n  #KM3268(450–10)")
 
-    writer = PdfWriter()
+    # Read the template once; every page starts from a fresh copy of it.
+    with open(template_path, "rb") as fh:
+        template_bytes = fh.read()
+    out_doc = None
     # Progress is counted in PAGES, not records: a single long tape can now
     # contribute up to MAX_PAGES pages.
     total = sum(max(1, int(rec.get("pages", 1))) for rec in records)
@@ -967,22 +1014,12 @@ def generate(excel_path: str, template_path: str, output_path: str,
         for p in range(n_pages):
             first = (p == 0)
 
-            overlay_buf = build_overlay(
-                rec["tape_num"],
-                rec["low"]  if first else None,
-                rec["high"] if first else None,
-                rec["hastelloy"], rec["eval_val"], rec["ref_ic"],
-                rec.get("dep_year"), rec.get("dep_month"), rec.get("dep_day"),
-                pld_by, rec.get("xrd_min", ""), rec.get("xrd_ave", ""),
-                blank_coords=not first,
-            )
-            # Re-read the template for every page: merge_page mutates the page
-            # object, so a shared reader would stack overlays onto one page.
-            template_reader = PdfReader(template_path)
-            overlay_reader  = PdfReader(overlay_buf)
-            page = template_reader.pages[0]
-            page.merge_page(overlay_reader.pages[0])
-            writer.add_page(page)
+            page = docx.Document(io.BytesIO(template_bytes))
+            fill_page(page, rec, pld_by, continuation=not first)
+            if out_doc is None:
+                out_doc = page
+            else:
+                _append_page(out_doc, page)
             ok += 1
 
             if progress_cb:
@@ -990,8 +1027,12 @@ def generate(excel_path: str, template_path: str, output_path: str,
             if log_cb and n_pages > 1 and not first:
                 log_cb(f"   ↳ page {p + 1} of {n_pages} — coordinates blank")
 
-    with open(output_path, "wb") as fh:
-        writer.write(fh)
+    try:
+        out_doc.save(output_path)
+    except PermissionError:
+        raise PermissionError(
+            f"Couldn't save {output_path}\n\n"
+            "If that file is open in Word, close it and try again.") from None
 
     if log_cb:
         log_cb(f"\n{len(records)} tape(s) → {ok} page(s).")
@@ -1072,9 +1113,9 @@ class App(tk.Tk):
 
         self._file_row(body, "Excel Data File (.xlsx):",
                        self.excel_path, self._pick_excel, row=0)
-        self._file_row(body, "Template PDF (IBAD-PF-009):",
+        self._file_row(body, "Template (IBAD-PF-009 .docx):",
                        self.template_path, self._pick_template, row=1)
-        self._file_row(body, "Save Output PDF As:",
+        self._file_row(body, "Save Output Word File As:",
                        self.output_path, self._pick_output,
                        row=2, is_save=True)
 
@@ -1119,7 +1160,7 @@ class App(tk.Tk):
         ttk.Separator(body, orient="horizontal").grid(
             row=6, column=0, columnspan=3, sticky="ew", pady=10)
 
-        self.gen_btn = self._btn(body, "⚙   Generate PDF",
+        self.gen_btn = self._btn(body, "⚙   Generate Word File",
                                  self._start_generate, width=22)
         self.gen_btn.grid(row=7, column=0, columnspan=3, pady=(0, 6))
 
@@ -1199,7 +1240,7 @@ class App(tk.Tk):
             self.excel_path.set(path)
             if not self.output_path.get():
                 base = os.path.splitext(path)[0]
-                self.output_path.set(base + "_TapeProcessForms.pdf")
+                self.output_path.set(base + "_TapeProcessForms.docx")
             self._log(f"Excel: {os.path.basename(path)}")
             self._detect_and_setup(path)
 
@@ -1238,8 +1279,8 @@ class App(tk.Tk):
 
     def _pick_template(self):
         path = filedialog.askopenfilename(
-            title="Select Tape Process Form Template PDF",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+            title="Select Tape Process Form Template (Word file)",
+            filetypes=[("Word documents", "*.docx"), ("All files", "*.*")],
         )
         if path:
             self.template_path.set(path)
@@ -1247,15 +1288,15 @@ class App(tk.Tk):
 
     def _pick_output(self):
         init_file = (os.path.basename(self.output_path.get())
-                     if self.output_path.get() else "TapeProcessForms.pdf")
+                     if self.output_path.get() else "TapeProcessForms.docx")
         init_dir  = (os.path.dirname(self.output_path.get())
                      if self.output_path.get() else os.path.expanduser("~"))
         path = filedialog.asksaveasfilename(
-            title="Save Output PDF As",
-            defaultextension=".pdf",
+            title="Save Output Word File As",
+            defaultextension=".docx",
             initialfile=init_file,
             initialdir=init_dir,
-            filetypes=[("PDF files", "*.pdf")],
+            filetypes=[("Word documents", "*.docx")],
         )
         if path:
             self.output_path.set(path)
@@ -1288,13 +1329,13 @@ class App(tk.Tk):
         if not tpl:
             messagebox.showwarning(
                 "Missing Template",
-                "Template PDF not found.\n\n"
-                "Place IBAD-PF-009-Rev00_Tape_Process_Form.pdf in the same\n"
+                "Word template not found.\n\n"
+                f"Place {TEMPLATE_FILE} in the same\n"
                 "folder as this program, or use Browse… to locate it.")
             return
         if not out:
             messagebox.showwarning("Missing Path",
-                                   "Please specify where to save the output PDF.")
+                                   "Please specify where to save the output Word file.")
             return
         # "Sent to PLD by:" — required, 4–10 characters
         if not (PLD_MIN_CHARS <= len(pld) <= PLD_MAX_CHARS):
@@ -1317,14 +1358,18 @@ class App(tk.Tk):
             messagebox.showerror("File Not Found", f"Excel file not found:\n{excel}")
             return
         if not os.path.isfile(tpl):
-            messagebox.showerror("File Not Found", f"Template PDF not found:\n{tpl}")
+            messagebox.showerror("File Not Found", f"Word template not found:\n{tpl}")
             return
+        # The output is a Word file: make sure its name says so
+        if not out.lower().endswith(".docx"):
+            out = os.path.splitext(out)[0] + ".docx"
+            self.output_path.set(out)
 
         self.gen_btn.configure(state="disabled", text="⏳  Generating…")
         self.progress["value"] = 0
         self._log(f"\n{'─' * 52}")
         self._log("Starting…")
-        self._set_status("Generating PDF, please wait…")
+        self._set_status("Generating the Word file, please wait…")
 
         fmt = self.detected_format
 
@@ -1354,7 +1399,7 @@ class App(tk.Tk):
                 )
 
                 if messagebox.askyesno(
-                    "PDF Generated",
+                    "Word File Generated",
                     f"✅  Success!\n\n"
                     f"{pages} page(s) saved to:\n{out}\n\n"
                     "Open the output folder?",
@@ -1367,7 +1412,7 @@ class App(tk.Tk):
                 self._set_status(f"Error: {exc}", color=RED)
                 messagebox.showerror("Generation Failed", str(exc))
             finally:
-                self.gen_btn.configure(state="normal", text="⚙   Generate PDF")
+                self.gen_btn.configure(state="normal", text="⚙   Generate Word File")
 
         threading.Thread(target=_worker, daemon=True).start()
 
