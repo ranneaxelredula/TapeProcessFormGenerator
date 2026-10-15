@@ -723,13 +723,19 @@ def fill_page(doc, rec, pld_by="", continuation=False):
     _fill_deposition_row(doc, rec, pld_by)
 
 
-def _append_page(out_doc, page_doc):
+def _first_free_id(doc):
+    """First number above every drawing ID (wp:docPr) in `doc`."""
+    return 1 + max((int(d.get("id")) for d in doc.element.body.iter(_WP + "docPr")
+                    if (d.get("id") or "").isdigit()), default=0)
+
+
+def _append_page(out_doc, page_doc, next_id):
     """
     Append the filled form `page_doc` to `out_doc` as a new page. The last
     paragraph of `out_doc` becomes a section break (an extra page-break
     paragraph would push a blank page), and the IDs that must be unique within
-    one Word file are renumbered; the text/paragraph IDs are dropped and Word
-    regenerates them.
+    one Word file are renumbered from `next_id` on; the text/paragraph IDs are
+    dropped and Word regenerates them. Returns the next free ID number.
     """
     body = out_doc.element.body
     sect = body.find(_W + "sectPr")
@@ -742,8 +748,6 @@ def _append_page(out_doc, page_doc):
         last_p.insert(0, ppr)
     ppr.append(copy.deepcopy(sect))
 
-    next_id = 1 + max((int(d.get("id")) for d in body.iter(_WP + "docPr")
-                       if (d.get("id") or "").isdigit()), default=0)
     for child in list(page_doc.element.body):
         if child.tag == _W + "sectPr":
             continue
@@ -760,6 +764,7 @@ def _append_page(out_doc, page_doc):
             for attr in (_W14 + "paraId", _W14 + "textId", _WP14 + "anchorId"):
                 el.attrib.pop(attr, None)
         sect.addprevious(child)
+    return next_id
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1018,8 +1023,9 @@ def generate(excel_path: str, template_path: str, output_path: str,
             fill_page(page, rec, pld_by, continuation=not first)
             if out_doc is None:
                 out_doc = page
+                next_id = _first_free_id(out_doc)
             else:
-                _append_page(out_doc, page)
+                next_id = _append_page(out_doc, page, next_id)
             ok += 1
 
             if progress_cb:
@@ -1360,9 +1366,15 @@ class App(tk.Tk):
         if not os.path.isfile(tpl):
             messagebox.showerror("File Not Found", f"Word template not found:\n{tpl}")
             return
-        # The output is a Word file: make sure its name says so
+        # The output is a Word file: make sure its name says so. Only a real
+        # document extension (e.g. an old ".pdf" name) is swapped; anything
+        # else is kept whole, so "Forms 2026.10.14" becomes
+        # "Forms 2026.10.14.docx", not "Forms 2026.10.docx".
         if not out.lower().endswith(".docx"):
-            out = os.path.splitext(out)[0] + ".docx"
+            root, ext = os.path.splitext(out)
+            if ext.lower() in (".pdf", ".doc", ".docm", ".dot", ".dotx", ".dotm"):
+                out = root
+            out += ".docx"
             self.output_path.set(out)
 
         self.gen_btn.configure(state="disabled", text="⏳  Generating…")
