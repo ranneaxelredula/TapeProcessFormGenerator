@@ -18,7 +18,7 @@ Fields filled per page (a missing value leaves the blank for hand entry). The
 first five are centred on their blank's line, underlined like the form:
   - Hastelloy thickness   → blank before "microns"
   - Name (#…(low-high))  → tape number + coordinates (each number on its part
-                            of "(___ ___-  ____ )")
+                            of the form's coordinate blank)
   - max(Evaluation_start, Evaluation_end) → IBAD#3_EVAL, before the form's "A"
   - Reference Ic          → IBAD#3_ref, before the form's "A"
   - XRD Tilt MIN / AVE    → before the form's "°" (RR124 exports only)
@@ -692,9 +692,8 @@ def _fill_ibad_box(doc, rec):
     """
     EVAL / ref values (on their underlined blank, before the form's "A") and
     XRD Tilt values (on the "______", before the form's "°") in the IBAD#3
-    box. Word keeps
-    two copies of a text box (for current and for older Word versions); both
-    are filled. The box's two lines get a real line break, so a short value
+    box. Word keeps two copies of a text box (for current and for older Word
+    versions); both are filled. The box's two lines get a real line break, so a short value
     can't pull the second line up. On a line whose EVAL / ref value is filled
     in, a tab moves "XRD Tilt" to XRD_TAB_STOP; a line whose value is missing
     keeps the form's own blank and spacing, which only just fit before that
