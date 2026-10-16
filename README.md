@@ -5,8 +5,10 @@ export and saves all forms as one Word file (1–3 pages per tape, depending on
 its length), so they can still be edited in Word. The Word template,
 `IBAD-PF-009_Tape Process Form_Rev.0.docx`, is included in this repository.
 
-Each value replaces its blank in the form. A value missing from the export
-leaves the blank as printed, for hand entry.
+Each value is written in place of its blank, centred on the blank's underline
+(the date and "Sent to PLD by" are written plainly). A value missing from the
+export leaves the blank as printed, for hand entry; so do the coordinates on a
+long tape's extra pages.
 
 ## Running it
 

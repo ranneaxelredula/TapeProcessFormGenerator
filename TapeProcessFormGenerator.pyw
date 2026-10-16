@@ -11,16 +11,17 @@ column — "Length, m" in Monday exports, "Length" in RR124 exports:
   - 600 m to 1099 m    → 2 pages
   - 1100 m and above   → 3 pages
 The first page carries every extracted value including the coordinates; any
-additional page repeats the same values but leaves the coordinate field as a
-blank "(______-______)" for hand entry.
+additional page repeats the same values but keeps the form's coordinate blank
+for hand entry.
 
-Fields filled per page (each value replaces its blank in the form, not
-underlined; a missing value leaves the blank for hand entry):
+Fields filled per page (a missing value leaves the blank for hand entry). The
+first five are centred on their blank's line, underlined like the form:
   - Hastelloy thickness   → blank before "microns"
-  - Name (#…(low-high))  → tape number + coordinates
-  - max(Evaluation_start, Evaluation_end) → IBAD#3_EVAL, written as "398A"
-  - Reference Ic          → IBAD#3_ref, written as "480A"
-  - XRD Tilt MIN / AVE    → before the printed "°" (RR124 exports only)
+  - Name (#…(low-high))  → tape number + coordinates (each number on its part
+                            of "(___ ___-  ____ )")
+  - max(Evaluation_start, Evaluation_end) → IBAD#3_EVAL, before the form's "A"
+  - Reference Ic          → IBAD#3_ref, before the form's "A"
+  - XRD Tilt MIN / AVE    → before the form's "°" (RR124 exports only)
   - IBAD deposition date  → the "202_/ 月/ 日" date of the IBAD Deposition row
   - "Sent to PLD by:"     → that row's Responsible Person column
 
@@ -97,10 +98,6 @@ PLD_MAX_CHARS = 10
 PAGE_LEN_2 = 600.0
 PAGE_LEN_3 = 1100.0
 MAX_PAGES  = 3
-
-# Written into the coordinate field on continuation pages, in place of the
-# form's own blank, so the coordinates can be filled in by hand.
-COORDS_BLANK = "(______-______)"
 
 
 def pages_for_length(length):
@@ -488,7 +485,9 @@ def _derive_values(cands, pool, pld_s, pld_e, s_col, e_col, ic_col, ref_col, xrd
 # splits differently whenever the file is edited and saved. If a blank can't be
 # found, generation stops with a message naming it rather than fill the wrong
 # place. A value replaces its blank in a run of its own, formatted like the
-# blank but not underlined; a missing value leaves the blank as printed.
+# blank; values marked _OnBlank are centred on the blank's width and
+# underlined, so they sit on the form's line. A missing value leaves the blank
+# as printed.
 
 _W    = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _M    = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
@@ -557,9 +556,9 @@ def _find_paragraph(paragraphs, pattern, what):
     return found[0]
 
 
-def _value_run(like_r, value):
+def _value_run(like_r, value, underline=False):
     """A new run holding `value` ("\\t" = tab, "\\n" = line break), formatted
-    like the run `like_r` but not underlined."""
+    like the run `like_r`, underlined or not as `underline` says."""
     r = OxmlElement("w:r")
     rpr = like_r.find(_W + "rPr")
     if rpr is not None:
@@ -574,7 +573,11 @@ def _value_run(like_r, value):
             t.text = part
             t.set(_XML_SPACE, "preserve")
             r.append(t)
-    Run(r, None).font.underline = False
+    Run(r, None).font.underline = bool(underline)
+    if underline:                       # pad spaces in the run's own (Latin) font
+        fonts = r.find(f"{_W}rPr/{_W}rFonts")
+        if fonts is not None:
+            fonts.attrib.pop(_W + "hint", None)
     return r
 
 
@@ -586,7 +589,7 @@ def _drop_if_empty(r):
         r.getparent().remove(r)
 
 
-def _replace(p, start, end, value):
+def _replace(p, start, end, value, underline=False):
     """Replace the visible text [start, end) of paragraph `p` with `value`."""
     pieces, pos = [], 0
     for text, t in _para_segments(p):
@@ -618,9 +621,35 @@ def _replace(p, start, end, value):
     for el in list(first_t.itersiblings()):
         rest.append(el)
     first_r.addnext(rest)
-    first_r.addnext(_value_run(first_r, value))
+    first_r.addnext(_value_run(first_r, value, underline))
     for r in {first_r, rest, *(t.getparent() for t, _, _ in pieces)}:
         _drop_if_empty(r)
+
+
+# Character widths of Calibri (and its metric twin Carlito), in 1/1000 of the
+# font size; regular and italic are the same for the characters values use.
+_CHAR_WIDTHS = dict(zip(
+    "0123456789._- \u00A0ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+    [507] * 10 + [252, 498, 306, 226, 226,
+     579, 544, 533, 615, 488, 459, 631, 623, 252, 319, 520, 420, 855, 646, 662,
+     517, 673, 543, 459, 487, 642, 567, 890, 519, 487, 468,
+     479, 525, 423, 525, 498, 305, 471, 525, 229, 239, 455, 229, 799, 525, 527,
+     525, 525, 349, 391, 335, 525, 452, 715, 433, 453, 395]))
+
+
+def _text_width(text):
+    return sum(_CHAR_WIDTHS.get(ch, 500) for ch in text)
+
+
+class _OnBlank(str):
+    """A value to write centred on its blank's line, underlined."""
+
+
+def _centered(value, blank):
+    """`value` padded with non-breaking spaces to the width of `blank`, centred
+    (a value wider than its blank is written as is)."""
+    pad = max(0, round((_text_width(blank) - _text_width(value)) / _CHAR_WIDTHS[NBSP]))
+    return NBSP * (pad // 2) + value + NBSP * (pad - pad // 2)
 
 
 def _fill(p, pattern, values, what):
@@ -633,28 +662,37 @@ def _fill(p, pattern, values, what):
         raise TemplateMismatch(what)
     m = found[0]
     for group in range(len(values), 0, -1):    # last first: earlier offsets stay put
-        if values[group - 1] is not None:
-            _replace(p, *m.span(group), values[group - 1])
+        value = values[group - 1]
+        if value is None:
+            continue
+        if isinstance(value, _OnBlank):
+            _replace(p, *m.span(group), _centered(value, m.group(group)), underline=True)
+        else:
+            _replace(p, *m.span(group), value)
 
 
 def _fill_buffer_line(doc, rec, continuation):
     """Hastelloy thickness, tape number and coordinates on the Buffer Tape line."""
     p = _find_paragraph(doc.element.body.iterchildren(_W + "p"), r"^Buffer Tape",
                         "the Buffer Tape line")
-    if continuation:
-        coords = " " + COORDS_BLANK
-    elif rec.get("low") is not None and rec.get("high") is not None:
-        coords = f" ({rec['low']} - {rec['high']})"
-    else:
-        coords = None
-    _fill(p, r"\(LMO, (_+) microns.*?#\s*(_+)( \(_+\s*_+-\s*_+\s*\))",
-          [rec.get("hastelloy") or None, rec.get("tape_num") or None, coords],
+    # Coordinates: each number is centred on its own part of the form's
+    # underlined "(___ ___-  ____      )"; "(", "-" and ")" stay put. Extra pages
+    # of a long tape keep the form's blank, to be filled in by hand.
+    has_coords = (not continuation and rec.get("low") is not None
+                  and rec.get("high") is not None)
+    _fill(p, r"\(LMO, (_+) microns.*?#\s*(_+) \((_+\s*_+)-(\s*_+\s*)\)",
+          [_OnBlank(rec["hastelloy"]) if rec.get("hastelloy") else None,
+           _OnBlank(rec["tape_num"]) if rec.get("tape_num") else None,
+           _OnBlank(str(rec["low"])) if has_coords else None,
+           _OnBlank(str(rec["high"])) if has_coords else None],
           "the thickness / tape number / coordinate blanks on the Buffer Tape line")
 
 
 def _fill_ibad_box(doc, rec):
     """
-    EVAL / ref values ("398A") and XRD Tilt values in the IBAD#3 box. Word keeps
+    EVAL / ref values (on their underlined blank, before the form's "A") and
+    XRD Tilt values (on the "______", before the form's "°") in the IBAD#3
+    box. Word keeps
     two copies of a text box (for current and for older Word versions); both
     are filled. The box's two lines get a real line break, so a short value
     can't pull the second line up. On a line whose EVAL / ref value is filled
@@ -667,18 +705,18 @@ def _fill_ibad_box(doc, rec):
         raise TemplateMismatch("the IBAD#3 / XRD Tilt box")
     ev, ref = rec.get("eval_val"), rec.get("ref_ic")
     x_min, x_ave = rec.get("xrd_min"), rec.get("xrd_ave")
-    pattern = (re.escape(_EVAL_LABEL) + r":([\xa0 ]+)A( +)"
+    pattern = (re.escape(_EVAL_LABEL) + r":\xa0([\xa0 ]+)A( +)"
                + re.escape(_MIN_LABEL) + r":(_+)°( +)"
-               + re.escape(_REF_LABEL) + r":([\xa0 ]+)A( +)"
+               + re.escape(_REF_LABEL) + r":  \xa0([\xa0 ]+)A( +)"
                + re.escape(_AVE_LABEL) + r":(_+)°")
     values = [
-        NBSP + ev if ev else None,              # "IBAD#3_EVAL: 398" + the form's "A"
+        _OnBlank(ev) if ev else None,           # on the underlined blank, before the form's "A"
         "\t" if ev else None,
-        NBSP + x_min if x_min else None,        # + the form's "°"
+        _OnBlank(x_min) if x_min else None,     # on the "______", before the form's "°"
         "\n",
-        "  " + NBSP + ref if ref else None,     # the form's spacing: values line up
+        _OnBlank(ref) if ref else None,
         "\t" if ref else None,
-        NBSP + x_ave if x_ave else None,
+        _OnBlank(x_ave) if x_ave else None,
     ]
     for p in paras:
         _fill(p, pattern, values, "the IBAD#3 / XRD Tilt blanks")
@@ -716,7 +754,7 @@ def fill_page(doc, rec, pld_by="", continuation=False):
     """
     Fill one copy of the form (a python-docx Document) for tape record `rec`.
     `continuation=True` is for a long tape's extra pages: every value is the
-    same as on its first page, but the coordinates are left as COORDS_BLANK.
+    same as on its first page, but the coordinates keep the form's blank.
     """
     _fill_buffer_line(doc, rec, continuation)
     _fill_ibad_box(doc, rec)
